@@ -1,0 +1,8 @@
+#!ipxe
+ifopen net0
+set net0/ip 192.168.XXX.XXX
+set net0/netmask 255.255.255.0
+set net0/gateway 192.168.XXX.XXX
+set dns 192.168.XXX.XXX
+show net0/ip
+chain http://192.168.XXX.XXX/baremetal.ipxe

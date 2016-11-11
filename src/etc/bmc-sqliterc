@@ -1,0 +1,3 @@
+.timeout 3000	-- [ms]
+.header off
+.mode csv

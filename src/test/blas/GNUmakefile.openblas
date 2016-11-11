@@ -1,0 +1,67 @@
+# for CentOS 7
+# http://www.cms-initiative.jp/ja/events/0530nakata.pdf
+
+#OPT=$(PWD)/opt
+#SUDO=sudo
+
+all::
+	$(MAKE) preinst
+	$(MAKE) build
+preinst::
+	$(MAKE) pkg
+	$(MAKE) download-openblas
+build::
+	$(MAKE) myblas
+	$(MAKE) check
+
+REFERENCE_LIB=/usr/lib64/libblas.so:/usr/lib64/liblapack.so.3
+OSBLAS_LIB=/usr/lib64/libopenblas.so.0
+MYBLAS_LIB=$(OPT)/lib/libopenblas.so
+OCTAVE=octave -q
+
+check::
+	$(OCTAVE) $@.m
+	LD_PRELOAD=$(REFERENCE_LIB) $(OCTAVE) $@.m
+	LD_PRELOAD=$(OSBLAS_LIB) $(OCTAVE) $@.m
+	LD_PRELOAD=$(MYBLAS_LIB) $(OCTAVE) $@.m
+
+bench-pkglapack::
+	if [ -n "$(SIZE)" ]; then sed -i.bak 's/^n=[0-9]*/n=$(SIZE)/' bench.m; fi
+	LD_PRELOAD=$(REFERENCE_LIB) $(OCTAVE) bench.m
+bench-pkgblas::
+	if [ -n "$(SIZE)" ]; then sed -i.bak 's/^n=[0-9]*/n=$(SIZE)/' bench.m; fi
+	LD_PRELOAD=$(OSBLAS_LIB) $(OCTAVE) bench.m
+bench-myblas::
+	if [ -n "$(SIZE)" ]; then sed -i.bak 's/^n=[0-9]*/n=$(SIZE)/' bench.m; fi
+	LD_PRELOAD=$(MYBLAS_LIB) $(OCTAVE) bench.m
+
+#VER=0.2.15
+#OPENBLAS=OpenBLAS-$(VER)
+#TARBALL=v$(VER).tar.gz
+
+VER=develop
+OPENBLAS=OpenBLAS-$(VER)
+TARBALL=$(VER).zip
+
+myblas:: $(MYBLAS_LIB)
+$(OPT)/lib/libopenblas.so: $(OPENBLAS)/libopenblas.so
+	cd $(OPENBLAS) && $(MAKE) install PREFIX=$(OPT)
+$(OPENBLAS)/libopenblas.so: $(OPENBLAS)/Makefile
+	cd $(OPENBLAS) && $(MAKE)
+$(OPENBLAS)/Makefile: $(TARBALL)
+	tar xvf $(TARBALL) || unzip -x $(TARBALL)
+	touch $@
+download-openblas: $(TARBALL)
+$(TARBALL):
+	wget --continue --no-clobber http://github.com/xianyi/OpenBLAS/archive/$(TARBALL)
+clean::
+	-rm -rf $(OPT)
+	-rm -rf $(OPENBLAS)
+distclean:: clean
+	-rm $(TARBALL)
+
+pkg::
+	$(SUDO) touch /usr/share/octave/3.8.2/etc/built-in-docstrings
+		#octave says:
+		#warning: docstring file '/usr/share/octave/3.8.2/etc/built-in-docstrings' not found
+

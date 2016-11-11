@@ -1,0 +1,315 @@
+#!/bin/sh
+
+# Copyright(C): National Institute of Advanced Industrial Science and Technology 2016
+# Authors:     
+#               Hidetaka Koie <koie-hidetaka@aist.go.jp>
+#               Kuniyasu Suzaki <k.suzaki@aist.go.jp>
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ERROR()
+{
+	printf "ERROR: %s\n" "$*" >&2
+}
+WARN()
+{
+	printf "WARNING: %s\n" "$*" >&2
+}
+INFO()
+{
+	printf "INFO: %s\n" "$*" >&2
+}
+
+stem()
+{
+	echo "$*" | $SED 's/[.].*$//'
+}
+
+new_id()
+{
+	#uuidgen | tr -d -		#long version
+	uuidgen | $SED 's/.*-//'	#short version
+}
+
+debug_dump_var()
+{
+	local pfx="$1"; shift
+	for X; do
+		eval local value=\$$pfx$X
+		echo "XXX $X='$value'"
+	done
+}
+
+retry()
+{
+	local max_retry="$1"; shift
+	local interval="$1"; shift
+	local I=0
+	while [ "$I" -lt "$max_retry" ]; do
+		if [ "$I" -gt 0 ]; then
+			sleep "$interval" || true
+		fi
+		if "$@"; then
+			return 0
+		fi
+		I="$((I + 1))"
+	done
+	ERROR "$* failed $max_retry times"
+	return 1
+}
+
+bmc_mktemp()
+{
+	local file
+	file="$(TMPDIR="$BMC_TMP" $MKTEMP)"
+	echo "$file"
+}
+bmc_mktempdir()
+{
+	local dir
+	dir="$(TMPDIR="$BMC_TMP" $MKTEMP -d)"
+	echo "$dir"
+}
+BMC_TMPFILE_LIST=""
+bmc_rm_after()
+{
+	# bmc_rm_after PATH
+	# bmc_rm_after USER@PATH
+	BMC_TMPFILE_LIST="$BMC_TMPFILE_LIST $*"
+}
+bmc_rm_atexit()
+{
+	local file
+	for file in $BMC_TMPFILE_LIST; do
+		case "$file" in
+		*@*)
+			local user="${file%%@*}"
+			local ufile="${file#*@}"
+			SUDO -u "$user" rm -rf "$ufile" || true
+			;;
+		*)
+			rm -rf "$file" || true
+			;;
+		esac
+	done
+}
+
+NOW()
+{
+	# XXX %N is GNU extension.
+	$DATE '+%s.%N'
+}
+DATE()
+{
+	$DATE '+%Y-%m-%d %H:%M:%S'
+}
+set_start_time()
+{
+	echo "$(DATE)|$(NOW)|$$|--Start--|" >>"$BMC_TIME_FILE" || true
+}
+timestamp()
+{
+	echo "$(DATE)|$(NOW)|$$|$*|" >>"$BMC_TIME_FILE" || true
+}
+
+SUDO()
+{
+	if "$BMC_DEBUG"; then {
+		printf "SUDO:"
+		for X in "$@"; do
+		       printf " '%s'" "$X"
+		done
+		printf "\n"
+	} >&2
+	fi
+
+	/usr/bin/sudo "$@"
+}
+
+sudo()
+{
+	ERROR "BUG: use SUDO"
+	exit 1
+}
+
+SUDOwrite()
+{
+	[ $# -eq 1 ] || { ERROR "INTERNAL ERROR: SUDOwrite $*"; exit 1; }
+	local file="$1"; shift
+	if "$BMC_DEBUG"; then printf "SUDO:write: %s\n" "$file" >&2; fi
+	/usr/bin/sudo tee "$file" >/dev/null
+}
+SUDOappend()
+{
+	[ $# -eq 1 ] || { ERROR "INTERNAL ERROR: SUDOappend $*"; exit 1; }
+	local file="$1"; shift
+	if "$BMC_DEBUG"; then printf "SUDO:append: %s\n" "$file" >&2; fi
+	/usr/bin/sudo tee -a "$file" >/dev/null
+}
+
+SQL()
+{
+	$SQLITE3 "$BMC_DB" "$@"
+}
+
+SQLwrite()
+{
+	if "$BMC_DEBUG"; then printf "SUDO:SQL: %s\n" "$*" >&2; fi
+	/usr/bin/sudo $SQLITE3 "$BMC_DB" "$@"
+}
+
+sqlquote()
+{
+	if [ -n "$*" ]; then
+		printf "'%s'" "$*"
+	else
+		printf "null"
+	fi
+}
+
+bmc_log()
+{
+	SQLwrite "INSERT INTO Log(pid,message) VALUES($$,'$*');"
+}
+
+db_count()
+{
+	local tbl="$1"; shift
+	local col="$1"; shift
+	local val="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	SQL "SELECT count(*) FROM $tbl WHERE $col = '$val'"
+}
+
+db_get()
+{
+	local tbl="$1"; shift
+	local rcol="$1"; shift
+	local col="$1"; shift
+	local val="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	SQL "SELECT $rcol FROM $tbl WHERE $col = '$val'"
+}
+
+db_get_container()
+{
+	local bmc_id="$1"; shift
+	local column="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	SQL "
+	SELECT $column
+	FROM Container
+	INNER JOIN Node ON Node.node_id = Container.node_id
+	INNER JOIN Kernel ON Kernel.kernel_id = Container.kernel_id
+	INNER JOIN Initrd ON Initrd.initrd_id = Container.initrd_id
+	INNER JOIN Rootfs ON Rootfs.rootfs_id = Container.rootfs_id
+	WHERE Container.bmc_id = '$bmc_id';"
+}
+
+route_get()
+{
+	local dst_addr="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	$IPCMD route get "$dst_addr"
+}
+cut_src_addr()
+{
+	# NOTE: "ip route get" outputs like this:
+	# $ /sbin/ip route get 127.0.0.1
+	# local 127.0.0.1 dev lo  src 127.0.0.1
+	#     cache <local>  mtu 65520 advmss 65495 hoplimit 64
+	# $ /sbin/ip route get ::1
+	# local ::1 via :: dev lo  table local  proto none  src ::1  metric 0  mtu 65536 rtt 3ms rttvar 3ms ssthresh 16 cwnd 16 advmss 65476 reordering 17 hoplimit 4294967295
+	$AWK '/src/ {
+		for (i=1; i<=NF; i++) {
+			if ($i=="src") {
+				print $(i+1);
+				exit;
+			}
+		}
+	}'
+}
+get_src_addr()
+{
+	local da="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	local sa
+
+	# Linux
+	sa="$(route_get "$da" | cut_src_addr)"
+	if [ -z "$sa" ]; then
+		ERROR "Can not get source addr to $da"
+	fi
+	echo "$sa"
+}
+
+show_table_tbl()
+{
+	$AWK -v FS="	" '
+	NR==1 {
+		print ".TS";
+		print "tab(	);";
+		for (i = 1; i <= NF; i++)
+			printf("|l");
+		print "|.";
+		print "_";
+		for (i = 1; i <= NF; i++)
+			printf("%s%s", $i, FS);
+		print "";
+		print "_";
+		next;
+	}
+	{ print; }
+	END {
+		if (NR > 0) {
+			print "_";
+			print ".TE";
+		} else {
+			#print "<EMPTY>";
+		}
+	}' | $TBL | $NROFF | $SED '/^$/d'
+}
+show_table_tsv()
+{
+	cat
+}
+show_table()
+{
+	local fmt="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	case "$fmt" in
+	tbl)	show_table_tbl;;
+	tsv)	show_table_tsv;;
+	esac
+}
+
+bmc_codesign()
+{
+	local infile="$1"; shift
+	local sigfile="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	$OPENSSL cms -sign -binary -noattr -passin file:"$CODESIGN_PASS" -in "$infile" -signer "$CODESIGN_CRT" -inkey "$CODESIGN_KEY" -certfile "$CODESIGN_CA" -outform DER -out "$sigfile"
+	#-passin pass:PASS
+	#-passin file::PATH
+	#-passin fd:FD
+	#-passin stdin
+}
+
+bmc_http_resp_header()
+{
+	echo "Content-Type: application/octet-stream"
+	echo "Connection: close"
+	echo "Pragma: no-cache"
+	echo "Cache-Control: no-cache"
+	echo ""
+}

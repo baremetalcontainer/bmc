@@ -1,0 +1,5 @@
+#!/bin/sh
+RC_LOCAL=/etc/rc.local
+if [ -x "$RC_LOCAL" ]; then
+	"$RC_LOCAL"
+fi

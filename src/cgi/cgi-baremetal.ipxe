@@ -1,0 +1,290 @@
+#!/bin/sh
+
+# Copyright(C): National Institute of Advanced Industrial Science and Technology 2016
+# Authors:     
+#               Hidetaka Koie <koie-hidetaka@aist.go.jp>
+#               Kuniyasu Suzaki <k.suzaki@aist.go.jp>
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -eu
+: "${BMC_CONF:=@BMC_CONF@}"
+[ -r "$BMC_CONF" ] || { echo "$0: can not read $BMC_CONF"; exit 1; }
+. "${BMC_CONF}"
+. "${BMC_SHARE_DIR}/bmc.func"
+
+trap bmc_atexit 0 HUP INT QUIT TERM
+bmc_atexit()
+{
+	trap - 0 # clear exit handler
+	bmc_rm_atexit
+}
+
+resp="$(bmc_mktemp)"
+bmc_rm_after "$resp"
+output_response()
+{
+	bmc_http_resp_header
+	cat "$resp"
+}
+
+echo_ipxe_timestamp()
+{
+	local tag="$1"; shift
+	local begend="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	echo "imgfetch --name timestamp http://${SERVER_ADDR}/${BMC_CGI_PATH}/bmc-debug?${tag}:${begend}_bmcid=${bmc_id}"
+	echo "imgfree timestamp"
+}
+
+ERROR_EXIT()
+{
+	{
+	timestamp "cgi-baremetal $*"
+	echo "#!ipxe"
+	echo "echo BMC: $*"
+	echo "prompt --key 0x02 --timeout 10000 Press Ctrl-B for the iPXE shell... || goto timeout"
+	echo "shell"
+	echo "exit"
+	echo ":timeout"
+	echo "poweroff"
+	echo "reboot"
+	} >"$resp"
+	output_response
+	exit 0
+}
+
+: "${HTTPS:=off}"
+case "$HTTPS" in
+on) http="https";;
+off) http="http";;
+*) ERROR_EXIT "ERROR: unexpected HTTPS=$HTTPS";;
+esac
+
+get_mac_addr()
+{
+	local ip4_addr="$1"; shift
+	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
+	local PATH="$PATH:/usr/sbin:/sbin"
+	$ARP -an | fgrep "($ip4_addr)" | cut -d ' ' -f4
+}
+
+# parse parameters
+session_id=""
+bmc_nonce=""
+for KV in $(echo "${QUERY_STRING-}" | tr '&' '\n'); do
+	case "$KV" in
+	session_id=*) session_id="${KV#session_id=}";;
+	bmc_nonce=*) bmc_nonce="${KV#bmc_nonce=}";;
+	*) ;; # ignore unknown parameters silently..
+	esac
+done
+if [ -n "$session_id" ]; then
+	# decode percent-encoding (quick hack)
+	session_id="$(echo "$session_id" | $SED 's|%3[Aa]|:|g')"
+fi
+
+# REMOTE_ADDR -> bmc_id
+mac_addr="$(get_mac_addr "$REMOTE_ADDR")"
+bmc1_id="$(SQL "SELECT bmc_id FROM Container
+	INNER JOIN Node ON Node.node_id = Container.node_id AND mac_addr_mgmt = '$mac_addr'")"
+bmc2_id="$(SQL "SELECT bmc_id FROM Container
+	INNER JOIN Node ON Node.node_id = Container.node_id AND ip4_addr_boot = '$REMOTE_ADDR'")"
+if [ -z "${bmc1_id}" -a -z "${bmc2_id}" ]; then
+	ERROR_EXIT "Error: Neither $REMOTE_ADDR nor $mac_addr is registered"
+fi
+bmc_id="${bmc2_id:-${bmc1_id}}"
+timestamp "cgi-baremetal bmcid=${bmc_id} from=$REMOTE_ADDR mac=$mac_addr"
+
+data="$(db_get_container "$bmc_id" "base_name, Kernel.kernel_param, Container.kernel_param, fstype, node_name, interface_os, ip4_addr_os, netmask_os, gateway_os, dns_os")"
+cuti() { echo "$1" | cut -d '|' -f "$2"; }
+I=1
+inci() { I="$((I + 1))"; }
+base_name="$(cuti "$data" "$I")"; inci
+kernel_param1="$(cuti "$data" "$I")"; inci
+kernel_param2="$(cuti "$data" "$I")"; inci
+fstype="$(cuti "$data" "$I")"; inci
+node_name="$(cuti "$data" "$I")"; inci
+iface="$(cuti "$data" "$I")"; inci
+ip4_addr="$(cuti "$data" "$I")"; inci
+netmask="$(cuti "$data" "$I")"; inci
+gateway="$(cuti "$data" "$I")"; inci
+dns="$(cuti "$data" "$I")"; inci
+
+# assertion
+case "$fstype" in
+nfs|ramfs|s-ramfs|isofs) ;;
+*) ERROR_EXIT "Internal Error: invalid fstype: $fstype";;
+esac
+
+# when s-ramfs, check session_id,bmc_nonce are valid.
+# when s-ramfs, if no session_id (first connection), redirect to ipxe_auth.
+if [ "$fstype" = "s-ramfs" ]; then
+	if [ -z "$session_id" ]; then
+		timestamp "cgi-baremetal_first:begin ${QUERY_STRING-} from=$REMOTE_ADDR"
+		timestamp "cgi-baremetal redirect"
+		if ! "$BMC_DEBUG"; then
+			https=https
+		fi
+
+		if true; then
+		{
+		# WORKAROUND FOR iPXE BUG (die at boot)
+		echo "#!ipxe"
+		echo "imgload https://${SERVER_ADDR}/${BMC_CGI_PATH}/auth2.cgi?bmcid=${bmc_id}&sign=req || goto error"
+		echo "imgverify auth2.cgi ${https}://${SERVER_ADDR}/cgi-bin/bmc-sig"
+		echo "imgexec auth2.cgi || goto error"
+		echo ":error"
+		echo "shell"
+		echo "exit"
+		} >"$resp"
+		else
+		{
+		echo "#!ipxe"
+		echo "imgfree"
+		echo_ipxe_timestamp load_new_session begin
+		echo "imgload ${https}://${SERVER_ADDR}/${TPM_CGI_PATH}/${TPM_NEWSESSION_CGI}?mac_addr=\${net0/mac}&bmcid=${bmc_id}&sign=req || goto error"
+		echo_ipxe_timestamp load_new_session end
+		echo_ipxe_timestamp verify_new_session begin
+		echo "imgverify ${TPM_NEWSESSION_CGI} ${https}://${SERVER_ADDR}/${BMC_CGI_PATH}/bmc-sig || goto error1"
+		echo_ipxe_timestamp verify_new_session end
+		echo "imgstat"
+		echo "imgexec ${TPM_NEWSESSION_CGI} || goto error"
+		echo "echo SOMETHING BAD"
+		echo "goto error"
+
+		echo ":error1"
+		echo "echo Code Verification failure"
+		echo ":error"
+		echo "prompt --key 0x02 --timeout 10000 Press Ctrl-B for the iPXE shell... || goto timeout"
+		echo "shell"
+		echo "exit"
+		echo ":timeout"
+		echo "poweroff"
+		echo "reboot"
+		echo "shell"
+		} >"$resp"
+		fi
+		output_response
+		timestamp "cgi-baremetal_first:end"
+		exit 0
+	fi
+	if [ "$HTTPS" != "on" ] && ! "$BMC_DEBUG"; then
+		ERROR_EXIT "ERROR: https is required when fstype is s-ramfs"
+	fi
+	if "$BMC_DEBUG"; then
+		nsess="$($SQLITE3 "$TPM_DB" "SELECT COUNT(*) FROM Hashes WHERE session_id = '$session_id'")"
+		if [ "$nsess" -eq 0 ]; then
+			ERROR_EXIT "ERROR: session is not found $session_id"
+		fi
+	fi
+	expiration="$($SQLITE3 "$TPM_DB" "SELECT session_good_for FROM Hashes WHERE session_id = '$session_id'")"
+	nonce2="$($SQLITE3 "$TPM_DB" "SELECT nonce2 FROM Hashes WHERE session_id = '$session_id'")"
+	timestamp "cgi-baremetal session_id=$session_id nonce2=$nonce2 expiration=$expiration"
+	if [ "$(date --date "$expiration" '+%s')" -lt "$(date '+%s')" ]; then
+		ERROR_EXIT "ERROR: session expired"
+	fi
+	if [ "$bmc_nonce" != "$nonce2" ]; then
+		ERROR_EXIT "ERROR: bmc_nonce mismatch"
+	fi
+	$SQLITE3 "$TPM_DB" "\
+	BEGIN TRANSACTION;
+	UPDATE Hashes SET nonce2 = NULL WHERE session_id = '$session_id';
+	COMMIT TRANSACTION;"
+fi
+
+timestamp "cgi-baremetal:begin ${QUERY_STRING-} from=$REMOTE_ADDR"
+	
+kernel_param="$kernel_param1 $kernel_param2"
+
+http_server="$SERVER_ADDR"		# note: $SERVER_ADDR is set by http server.
+nfs_server="$http_server"		## XXX
+nfs_root="${BMC_DISTFS_ROOT}/${base_name}"	# BMC_DISTFS_ROOT is defined in bmc.conf
+
+autoconf="off"
+
+#ip="${ip4_addr}:${nfs_server}:${gateway}:${netmask}:${node_name}:${iface}:${autoconf}:${dns}:${dns}"	#ng
+#ip="${ip4_addr}:${nfs_server}:${gateway}:${netmask}:${node_name}"	#ok
+ip="${ip4_addr}:${nfs_server}:${gateway}:${netmask}:${node_name}:${iface}"	#ok
+
+timestamp "cgi-baremetal waitstate:begin"
+while : ; do
+	state="$(db_get Container state bmc_id "${bmc_id}")"
+	timestamp "cgi-baremetal waitstate bmcid=${bmc_id} state=${state}"
+	case "$state" in
+	up)		sleep "$BMC_POLL_INTERVAL"
+			;;
+	pending)	break
+			;;
+	shutting-down|terminated|"")
+			ERROR_EXIT "ERROR: $bmc_id is dead"
+			;;
+	esac
+done
+timestamp "cgi-baremetal waitstate:end"
+
+{
+echo "#!ipxe"
+echo "imgfree"
+echo_ipxe_timestamp load_kernel begin
+echo "kernel ${http}://${http_server}/${BMC_DOC_PATH}/kernel/K${base_name} || goto error"
+echo_ipxe_timestamp load_kernel end
+echo_ipxe_timestamp load_initrd begin
+echo "initrd ${http}://${http_server}/${BMC_DOC_PATH}/initrd/I${base_name} || goto error"
+echo_ipxe_timestamp load_initrd end
+
+case "$fstype" in
+nfs)
+	echo "imgargs K${base_name} bmcid=${bmc_id} boot=nfs rootdelay=1 ip=${ip} root=/dev/nfs nfsroot=${nfs_server}:${nfs_root} port=tcp rw ${kernel_param}"
+	;;
+ramfs|s-ramfs)
+	echo "imgargs K${base_name} bmcid=${bmc_id} boot=local rootdelay=1 ip=${ip} bmcroot=${http}://${http_server}/${BMC_DOC_PATH}/rootfs/${base_name}.tar.gz bmcroot2=${http}://${http_server}/${BMC_DOC_PATH}/rootfs/${base_name}-etc.tar.gz rw ${kernel_param}"
+	if [ "$fstype" = "s-ramfs" ]; then
+		echo_ipxe_timestamp verify_kernel begin
+		echo "imgverify K${base_name} ${http}://${http_server}/${BMC_DOC_PATH}/kernel/K${base_name}.sig || goto error1"
+		echo_ipxe_timestamp verify_kernel end
+		echo_ipxe_timestamp verify_initrd begin
+		echo "imgverify I${base_name} ${http}://${http_server}/${BMC_DOC_PATH}/initrd/I${base_name}.sig || goto error1"
+		echo_ipxe_timestamp verify_initrd end
+		echo "imgstat"
+	fi
+	;;
+isofs)
+	echo "imgargs K${base_name} iso raw"
+	;;
+esac
+
+echo_ipxe_timestamp kernel_boot begin
+echo "imgexec K${base_name} || goto error"
+echo "echo SOMETHING BAD"
+echo "goto error"
+
+echo ":error1"
+echo "echo Code Verification failure"
+echo ":error"
+echo "imgfetch ${http}://${http_server}/${BMC_CGI_PATH}/notify-bmc?bmcid=${bmc_id}&status=loading_os_failed"
+echo "prompt --key 0x02 --timeout 10000 Press Ctrl-B for the iPXE shell... || goto timeout"
+echo "shell"
+echo "exit"
+echo ":timeout"
+echo "poweroff"
+echo "reboot"
+} >"$resp"
+output_response
+
+timestamp "cgi-baremetal:end"
+exit 0
+
+#MEMO
+#imgargs kernel boot=nfs rootdelay=10 ip=dhcp root=/dev/nfs nfsroot=${nfs_server}:${nfs_root} port=tcp rw
+#imgargs ${kernel} boot=nfs rootdelay=10 ip=${ip4_addr}:${nfs_server}:${gateway}:${netmask}:${node_name}:${iface}:${autoconf}:${dns}:${dns} root=/dev/nfs nfsroot=${nfs_server}:${nfs_root} port=tcp rw

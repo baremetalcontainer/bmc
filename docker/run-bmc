@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eux
+IMG=$(basename "$0" | sed 's/^run-//')
+${DOCKER:-docker} run --privileged --net=host --interactive --tty "$@" "$IMG"

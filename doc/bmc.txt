@@ -1,0 +1,1386 @@
+= BMCマニュアル
+:Author: Xxx Xxx
+:Email: bmc@aist.go.jp
+:Date: 2016-03-31
+:Revision: 0.1
+
+//asciidoc cheatsheet: http://powerman.name/doc/asciidoc
+
+//:listdef-labeled.style: horizontal
+:listdef-labeled3.style: horizontal
+
+//banner -w 128 "BMC" | ./rotate-txt.sh | ./slant-txt.sh
+//....
+//                                                                               
+//             ################     ########         #######       ######### ## 
+//               ####        ####     ######         #####        ###      #### 
+//              ####         ####    ######        ######      ####        ### 
+//              ####          ###    #######       # ####     ####          ## 
+//             ####          ####   ## ####       # ####     ###              
+//             ####          ####   ## #####      # ####    ####              
+//            ####          ###    ## #####     #  ####   #####              
+//            ####        ####     ##  ####     #  ####   ####               
+//           ####     ######      ##  #####    #  ####   ####               
+//           ##############       ##   ####   ##  ####   ####               
+//          ####        ####     ##   #####  ##  ####   ####               
+//          ####          ###    ##   #####  #   ####   ####               
+//         ####          ####   ##    #### ##   ####   ####               
+//         ####           ####  ##    ######    ####   ####               
+//        ####           ####  ##     #####    ####   #####              
+//        ####           ####  ##     #####    ####    ####              
+//       ####           ####  ##     ####     ####    #####           # 
+//       ####          ####   ##      ###     ####     ####             
+//      ####          ####   ##      ###     ####      ####         #  
+//      ####         ####    ##      ##      ####       ####       #   
+//     ####       ####      ##       #      ####        ######  ##    
+//   #############        ######     #    ########          ###       
+//....
+
+
+== Glossary
+
+//[glossary]
+[horizontal]
+BMC:: Bare Metal Container
+BMCserver:: BMCがインスールされたLinuxマシン(BMCにサーバプロセスはいない)。ユーザはbmcコマンドを実行してBMCサーバを操作する。
+Docker:: (略)
+DockerHub:: (略)
+BMCHub:: bitbucketをDockerHubに似せたもの(ざっくり)
+Image:: Linuxが動作するファイルツリー。/配下まるごとを含む。
+Container:: Linuxカーネル上で直接動いているDockerイメージ (通常DockerイメージはDocker Engineの上で動く)
+Node:: BMCコンテナを実行するマシン。(Worker Nodeとも)
+BMCID:: コンテナを作成したときに付与されるユニークなID
+Kernel:: Linuxカーネル
+Initrd:: Linux Initrd (cpio -o -H newc | gzipで作成されたもの)
+Rootfs:: = Image
+AMT::
+  http://www.intel.co.jp/content/www/jp/ja/architecture-and-technology/intel-active-management-technology.html[Intel Active Management Techology] +
+  BMCでは電源on/off制御に利用する。 
+  vPro塔載のPCで利用可能。
+  日本語キーボードなのにAMTの設定画面ではUS配列になっている場合がありパスワードに記号を含める場合には注意が必要。
+IPMI::
+  http://www.intel.co.jp/content/www/jp/ja/servers/ipmi/ipmi-second-gen-interface-spec-v2-rev1-1.html[Intelligent Platform Management Interface] +
+  BMCでは電源on/off制御に利用する。
+WOL::
+  Wake-on-LAN
+  BMCでは電源onに利用する。AMT/IPMIと異なりWOLは電源offにできないため、
+  ブートが失敗した場合にノードが制御不能となる。
+  Ethernetフレームをつかうため、BMCserverと同じセグメントに属していなければならない。
+
+
+== 全体像
+
+
+=== 概念図
+
+["ditaa",options="no-separation"]
+----------------------------------------
+
+ DockerHub               Docker engine           BMC server
++---------------+       +---------------+       +-----------------------+
+|               |       |               |       |                       |
+|   +------+    |       |   +------+    |       |   +------+  +--+++++  | 
+|   | repo |    |       |   | repo |    |       |   | repo |  |DB|||||  |
+|   |      |--------------->|      |--------------->|      |  +--+++++  |
+|   |   {s}|    |docker |   |   {s}|    | bmc   |   |   {s}|  +--+++++  |
+|   +------+    | pull  |   +------+    |  pull |   +------+  +--+++++  |
+|               |       |               |       |      |                |
++---------------+       +---------------+       +------|----------------+
+                                                       |
+                                                       | bmc run
+                            Worker Node                |
+                           +-------------------+       |
+                           | +-------------+   |       |
+                           | | +---------+ |   |       |
+                           | | | +-----+ | |   |       |
+                           | | | |     | | |   |       |
+                           | | | | App | | |   |       |
+                           | | | |     | | |   |       |
+                           | | | +-----+ | |   |       |
+                           | | |   OS    |<------------+ HTTP/NFS
+                           | | +---------+ |   |       |
+                           | |    Kernel   |<----------+ iPXE
+                           | +-------------+   |       |
+                           |     Hardware      |<------+ AMT/IPMI/WOL
+                           +-------------------+  
+
+----------------------------------------
+
+
+=== 構成要素
+
+----------------------------------------
+
+                   :                               : WOL
+                   :                               : IPMI
+                   :         bmc cmd               : AMT
+ssh-agent ---(ssh)--- Shell ---------- BMCserver ------- BIOS
+ |                 :                 / |  |   |    :     
+~/.ssh/id_rsa      :    ~/.ssh/id_rsa  | DB  Repo  :      
+   id_rsa.pub      :       id_rsa.pub  |  |   |    :         TPM,cert
+                   :                   |  |   |    :        /
+                   :                   |  HTTPd ------- iPXE
+                   :                   |  NFS  \   :     kernel
+                   :                   |      cert :     intrd
+                   :                   |           :      rootfs
+                   :                   +-- ssh ----------- sshd --- app
+                   :                               :  
+ User Console      :  BMC server                   :  Worker Node
+
+----------------------------------------
+
+
+=== コンテナの状態遷移
+
+---------------------------------------
+ o
+ | bmc run
+ V
+terminated
+ |
+ | powerup (bmc run)
+ V
+up
+ |
+ | prepare files
+ V
+pending
+ |
+ | recv notification (crossed /etc/rc.local)
+ V
+running
+ |
+ | bmc kill
+ V
+shutting-down
+ |
+ | powerdown (bmc kill)
+ V
+terminated
+ |
+ | bmc rm
+ V
+ o
+----------------------------------------
+
+
+=== `bmc pull` のシーケンス
+
+----------------------------------------
+User            BMCserver       DockerEngine    DockerHub(DockerRegistry)
+| bmc pull XXX  |               |               |
+|-------------->|               |               |
+|               | docker pull XXX               | }
+|               |-------------->|               | } bmc pull --nopull時は
+|               |               |  GET /../XXX  | } DockerHubからpullしない
+|               |               |-------------->| } 
+|               |               |    <-o        | }
+|               | docker run XXX|               |
+|               |-------------->|               |
+|               | docker wait   |               |
+|               |-------------->|               |
+|               | docker export |               |
+|               |-------------->|               |
+|               |   <-o         |               |
+|               * tarball保存   |               |
+|               |               |               |
+----------------------------------------
+
+
+=== `bmc run --fstype=nfs` のシーケンス
+
+----------------------------------------
+User            BMCserver       WorkerNode
+| bmc run cmdarg..              |
+|-------------->|               |
+|               * tarball展開   |
+|               * /etc編集      |
+|               |               |
+|               |  powerup      |
+|               |-------------->|
+|  builtin    { |               * iPXE起動
+|  script     { |               * networkの初期設定
+|             { |               * chain http://BMC_SERVER/cgi-bin/baremetal.ipxe
+|             { | GET /cgi-bin/baremetal.ipxe
+|             { |<--------------|
+|             { |     o->       |
+|               |               |
+|             { |               * kernel http://BMC_SERVER/bmc/kernel/Kxxx
+|  script     { | GET /bmc/kernel/Kxxx
+|  returned   { |<--------------|
+|  by         { |     o->       |
+|baremetal.ipex |               * initrd http://BMC_SERVER/bmc/initrd/Ixxx
+|             { | GET /bmc/initrd/Ixxx
+|             { |<--------------|
+|             { |     o->       |
+|             { |               * imgexec Kxxx
+|               |               |
+|  initrd     { |               * cpio展開+init実行
+|  running    { | NFS MOUNT     * NFSマウント
+|             { |<--------------|
+|               |               |
+|  OS         { |               * 本当のinit実行
+|  running    { |               * /etc/rc.local実行
+|             { | GET /cgi-bin/notify-bmc?bmcid=BMCID
+|             { |<--------------|
+|             { | ssh cmdarg..  |
+|             { |-------------->|
+|             { |               * exec cmdarg...
+----------------------------------------
+
+
+=== `bmc run --fstype=ramfs` のシーケンス
+
+----------------------------------------
+User            BMCserver       WorkerNode
+| bmc run cmdarg..              |
+|-------------->|               |
+|               * tarball展開   |
+|               * /etc編集      |
+|               |               |
+|               |  powerup      |
+|               |-------------->|
+|  builtin    { |               * iPXE起動
+|  script     { |               * networkの初期設定
+|             { |               * chain http://BMC_SERVER/cgi-bin/baremetal.ipxe
+|             { | GET /cgi-bin/baremetal.ipxe
+|             { |<--------------|
+|             { |     o->       |
+|               |               |
+|             { |               * kernel http://BMC_SERVER/bmc/kernel/Kxxx
+|  script     { | GET /bmc//kernel/Kxxx
+|  returned   { |<--------------|
+|  by         { |     o->       |
+|baremetal.ipex |               * initrd http://BMC_SERVER/bmc/initrd/Ixxx
+|             { | GET /bmc/initrd/Ixxx
+|             { |<--------------|
+|             { |     o->       |
+|             { |               * imgexec Kxxx
+|               |               |
+|  initrd     { |               * cpio展開+init実行
+|  running    { |               * wget http://BMC_SERVER/bmc/rootfs/xxx.tar.gz
+|             { | GET /bmc/rootfs/xxx.tar.gz
+|             { |<--------------|
+|             { |     o->       * tarball展開
+|             { |               * wget http://BMC_SERVER/bmc/rootfs/xxx.tar.gz-etc
+|             { | GET /bmc/rootfs/xxx.tar.gz-etc
+|             { |<--------------|
+|             { |     o->       * tarball展開
+|               |               |
+|  OS         { |               * 本当のinit実行
+|  running    { |               * /etc/rc.local実行
+|             { | GET /cgi-bin/notify-bmc?bmcid=BMCID
+|             { |<--------------|
+|             { | ssh cmdarg..  |
+|             { |-------------->|
+|             { |               * exec cmdarg...
+----------------------------------------
+
+
+== インストール手順
+
+
+=== 準備
+
+BMCが依存するソフトウェアをあらかじめインストールしておく。
+
+.必要なパッケージ
+* amttool
+* docker
+* etherwake
+* expect
+* git
+* ipmitool
+* jq
+* nc
+* groff
+* openssl
+* sqlite3
+* ssh
+* wget
+
+
+=== iPXE
+
+カスタム設定のiPXEをインストールしたUSBメモリをBMCノードの数だけ用意する。
+BIOSの設定でWOL,IPMI,AMTに反応するようにする。またUSBメモリからブートするようする。
+
+* ipxe/src/config/general.h で有効に設定するもの
+  ** `DOWNLOAD_PROTO_HTTPS`
+  ** `IMAGE_TRUST_CMD`
+  ** `POWEROFF_CMD`
+  ** そのほか *_CMD 
+* ipxe/src/config/console.h で有効に設定するもの
+  ** `CONSOLE_SYSLOG` iPXEスクリプトのデバッグに便利
+* `make bin/ipxe.usb EMBED=myscript.ixpe CERT=aaa/bbb.pem,xxx/yyy.pem TRUST=aaa/bbb.pem,xxx/yyy.pem`
+  ** コードサイニングの証明書・サーバー証明書を指定する。
+  ** DEBUG=certstor:15
+* `dd if=bin/ipxe.usb bs=4096 of=/dev/...`
+
+.iPXEスクリプトの例
+----------------------------------------
+#!ipxe
+ifopen net0
+set net0/ip 192.168.1.10       #ノード毎に変える
+set net0/netmask 255.255.255.0
+set net0/gateway 192.168.1.254
+set dns 192.168.1.1
+show net0/ip
+chain http://192.168.1.2/baremetal.ipxe
+            #BMCサーバのアドレスを指定する
+----------------------------------------
+
+
+=== 設定 [[bmc_conf]]
+
+`/etc/sudoers` を編集して、
+BMCサーバ上でBMCコマンドを実行するユーザがsudoできるように設定する。
+
+apacheはCGIが使えるように設定する。
+
+設定ファイル `/etc/exports` を編集し、NFSで読み書き可でエクスポートするディレクトリを用意する。
+変更後、`service nfs restart` でNFSサーバを再起動する。
+
+./etc/exportsの設定例
+----------------------------------------
+/var/docker-nfs *(rw,no_root_squash)
+----------------------------------------
+
+tar-ballを展開し、`src/etc/bmc.conf` を環境に合わせて設定する。
+
+----------------------------------------
+% tar xvf bmc-xxx.tar.gz
+...
+% cd bmc-xxx/src
+% vi etc/bmc.conf
+----------------------------------------
+
+`HTTPD_USER`,`HTTPD_GROUP`::
+    apacheの実行ユーザ(`User`)とグループ(`Group`)に合わせる。
+`CGI_DIR`::
+    apacheの設定でCGIプログラムを置くことになっているディレクトリ(`ScriptAlias`)を指定する。
+`DOC_DIR`::
+    apacheの設定でHTMLファイルを置くことになっているディレクトリ(`DocumentRoot`)を指定する。
+`BMC_DB_DIR`::
+    sqlite3のDB置くディレクトリを指定する。 `/tmp` は未使用ファイルを削除するスクリプトがcronで走る可能性があるので避ける。
+`BMC_REPO_ROOT`:: 
+    kernel,initrd,imageファイルを置くディレクトリを指定する。おなじく `/tmp` は避ける。
+`BMC_DISTFS_ROOT`::
+    NFS exportしているディレクトリを指定する。
+`BMC_TMP`::
+    永続性が重要ではないファイルを置くディレクトリを指定する。おなじく `/tmp` は避ける。
+`ETHDEV`::
+    WOLのマジックパケットを送信するのに使うインタフェースを指定する。
+    cgi-baremetal.ipxeでも使用(FIXME)。
+`ETHERWAKE`::
+    CentOSとUbuntuとでファイル名が異なる。
+
+.S-RAMFS向けの設定
+(略)
+
+
+`src/sbin/bmc-load.sh` を編集し、
+BMCノードとkernel/initrd/rootfsを設定するスクリプトを環境にあわせる。
+
+
+=== インストール
+
+----------------------------------------
+% cd /.../bmc-xxx/src
+% make
+...
+% sudo ./install.sh
+...
+%
+----------------------------------------
+
+配布時の設定では `/opt/bmc` 配下にインストールされる。
+
+`sudo ./install.sh erase` でアンインストールできる。
+
+.簡易動作チェック
+----------------------------------------
+% wget -q -O- --no-check-certificate https://localhost/cgi-bin/baremetal.ipxe
+#!ipxe
+echo BMC: Error: Neither ::1 nor  is registered
+... と表示されればok
+% wget -q -O- --no-check-certificate "https://localhost/cgi-bin/notify-bmc?bmcid=999&status=xxx"
+#!ipxe
+echo BMC: Request from Bad address ::1 と表示されればok
+----------------------------------------
+
+//↓↓たぶん不要
+//`bmc` コマンド利用ユーザはsqlite3コマンド設定ファイル ~/.sqliterc を作成しなければならない。
+//
+//----------------------------------------
+//% cp etc/dot.sqliterc ~/.sqliterc
+//----------------------------------------
+
+
+=== 初期化
+
+----------------------------------------
+% cd /.../bmc-xxx/src
+% sudo /opt/bmc/sbin/bmc-init
+...
+% /opt/bmc/sbin/bmc-load
+...
+% /opt/bmc/bin/bmc images
+...
+% /opt/bmc/bin/bmc nodes
+...
+----------------------------------------
+
+
+== ファイル構成
+
+* /opt/bmc/             ... $BMC_TOP_DIR
+  ** bin/               ... $BMC_BIN_DIR
+     *** <<bmc-cmd,bmc>>
+  ** sbin/              ... $BMC_SBIN_DIR
+     *** <<bmc-init,bmc-init>>
+     *** <<bmc-load,bmc-load>>
+     *** <<bmc-dumpdb,bmc-dumpdb>>
+     *** <<bmc-cleanup,bmc-cleanup>>
+     *** <<bmc-sql,bmc-sql>>
+  ** etc/               ... $BMC_ETC_DIR
+     *** <<bmc_conf,bmc.conf>>
+     *** <<bmc_conf,bmc.conf.local>>
+  ** share/             ... $BMC_SHARE_DIR
+     *** bmc.func
+  ** tool/              ... $BMC_TOOL_DIR
+     *** <<bmc-copy,bmc-copy>>
+     *** <<bmc-get-image,bmc-get-image>>
+     *** <<bmckillall,bmckillall>>
+     *** <<bmc-push,bmc-push>>
+     *** <<joule,joule>>
+     *** <<mkchart,mkchart>>
+     *** <<plotdmesg,plotdmesg>>
+     *** <<sarnet,sarnet>>
+     *** <<wattchecker,wattchecker>>
+     *** <<setpgid,setpgid>>
+* /var/
+  ** www/html/          ... $DOC_DIR
+     *** bmc/           ... $BMC_DOC_DIR
+  ** www/cgi-bin/       ... $CGI_DIR,$BMC_CGI_DIR,$TPM_CGI_DIR (CentOS)
+     *** baremetal.ipxe ... $BMC_BAREMETAL_CGI
+     *** auth2.cgi
+     *** new_session.cgi... $TPM_NEWSESSION_CGI
+     *** tryauth.cgi    ... $TPM_TRYAUTH_CGI
+     *** bmc-debug
+  ** tmp/bmc/           ... $BMC_TMP
+     *** time.log       ... $BMC_TIME_FILE
+     *** incoming/      ... $BMC_INCOMING
+  ** spool/bmc/         ... $BMC_DB_DIR
+     *** <<bmc-dumpdb,bmc.db>>         ... $BMC_DB
+     *** auth/
+         **** <<iPXE-Auth,hashes.sqlite3>>
+     *** repo/          ... $BMC_REPO_ROOT
+         **** kernel/
+         **** initrd/
+         **** rootfs/
+  ** docker-nfs/        ... $BMC_DISTFS_ROOT
+* /usr/lib/
+  ** cgi-bin/           ... $CGI_DIR,$BMC_CGI_DIR,$TPM_CGI_DIR (Ubuntu)
+     *** -> /var/www/cgi-bin/
+* /etc/ssl/
+  ** ipxe/
+     *** codesign.key   ... $CODESIGN_KEY
+     *** codesign.pass  ... $CODESIGN_PASS
+     *** codesign.crt   ... $CODESIGN_CRT
+  ** CA/
+     *** capem.pem      ... $CODESIGN_CA
+
+
+=== `time.log` について
+
+デバッグ目的のログや性能測定目的のログが記録される。
+
+.`time.log` のフォーマット
+----------------------------------------
+ISO時刻|UNIX時刻|PID|ログメッセージ|
+...
+----------------------------------------
+
+性能目的のログではメッセージ部分は以下のフォーマットに従うとmkchartで扱える。
+
+.bmcコマンド内
+----------------------------------------
+    timestamp "処理名:begin"
+    ...処理...
+    timestamp "処理名:end"
+----------------------------------------
+
+.barematal.cgi内(BMCserver側で実行される処理について)
+----------------------------------------
+    timestamp "処理名:begin"
+    ...処理...
+    timestamp "処理名:end"
+----------------------------------------
+
+.barematal.cgi内(ワーカーノード上のiPXEで実行される処理について)
+----------------------------------------
+    echo_ipxe_timestamp 処理名 begin
+    echo "iPXEスクリプト"
+    echo_ipxe_timestamp 処理名 end
+----------------------------------------
+
+.initrd内
+----------------------------------------
+    wget -O /dev/null "http://$BMCSERVER/cgi-bin/bmc-debug?処理名:begin_bmcid=$BMCID"
+    ...処理...
+    wget -O /dev/null "http://$BMCSERVER/cgi-bin/bmc-debug?処理名:end_bmcid=$BMCID"
+----------------------------------------
+
+
+=== $BMC_REPO_ROOT/rootfs について
+
+rootfsはコンテナごとに書き換えなければならない。
+
+/root/.ssh/authorized_keys:: ユーザのpubkeyをコピーする。
+/root/.ssh/environment:: BMCID,BMC_SERVER,BMC_CLIENTを設定する。
+/etc/ssh/sshd_config:: PermitRootLogin yesの設定を追加する。
+/etc/ssh/environment:: Docker image内の環境変数設定をコピーする。
+/etc/rc.local:: `wget http://.../notify-bmd` を追加する。(そもそも/etc/rc.localがなかったらsymlink作成から)
+/etc/resolv.conf: bmc addnodeのDNS設定を反映する。
+/etc/hosts: localhostの設定を追加する。
+/etc/localtime: BMCサーバと同じタイムゾーンに設定する。
+
+書き換えが必要なファイルは /root と /etc だけなので、
+bmc pull時に/rootと/etcだけを固めたtarballをつくって高速化している。
+
+
+== kernelとinitrd
+
+ネットワークブートするので
+ネットワークデバイスやNFSはビルトインの設定でカーネルを作成する。
+
+initrdはカーネル起動引数で渡されたrootfsのURIを理解できなければならない。
+
+
+== BMCコマンド [[bmc-cmd]]
+
+
+=== BMC全体に関係するコマンド
+
+
+==== bmc version
+
+BMCのバージョン番号を表示する。
+
+----------------------------------------
+include::usage/version.txt[]
+----------------------------------------
+
+
+==== bmc timestamp
+
+タイムスタンプを打つ。
+
+
+=== bmc help
+
+コマンド一覧を表示する。
+
+----------------------------------------
+Usage: bmc help
+----------------------------------------
+
+コマンドのusageを表示する。
+
+----------------------------------------
+Usage: bmc help SUBCMD
+       または
+       bmc SUBCMD --help
+----------------------------------------
+
+
+=== BMCの構成管理に関係するコマンド
+
+
+==== bmc addnode
+
+BMCノードを追加する。
+
+----------------------------------------
+include::usage/addnode.txt[]
+----------------------------------------
+
+++--name=++_name_:: 追加するノード名を指定する。
+`--rank=`_rank_:: 追加するノードのランクを指定する。 `bmc run --rank=` で使用する。
+`--method_mgmt=`_kwd_:: 電源管理方法を選択する。
+  `wol`::: WoL
+  `amt`::: AMT
+  `ipmi`::: IPMI
+`--descr=`=_text_:: ノードの説明を指定する。省略可。
+`--have_tpm=`_bool_:: TPMモジュールを持っているかどうか。省略時は `false` 。
+`--mac_addr_mgmt=`_EUI48_:: WoL時に使用するノードのMACアドレスを指定する(コロン区切り)。
+`--ip4_addr_mgmt=`_IPv4addr_:: AMTとIPMI時に使用するノードのIPv4アドレスを指定する。
+`--password_mgmt=`_text_:: AMTやIPMIのパスワードを指定する。
+`--ip4_addr_boot=`_IPv4addr_:: iPXEで立ち上がった直後のノードのIPv4アドレスを指定する。
+  CGIスクリプトでのソースアドレスチェックに使用される。
+`--ip4_addr_os=`_IPv4addr_:: OSが使用するIPv4アドレスを指定する。
+`--netmask_os=`_IPv4addr_:: OSが使用するネットマスクを指定する。
+`--gateway_os=`_IPv4addr_:: OSが使用するデフォルトルータを指定する。
+`--dns_os=`_IPv4addr_:: OSが使用するDNSサーバを指定する。
+
+
+==== bmc delnode
+
+BMCノードを削除する。
+
+----------------------------------------
+include::usage/delnode.txt[]
+----------------------------------------
+
+`--name=`_name_:: 削除するノード名を指定する。
+
+
+==== bmc nodes
+
+BMCノードの一覧を表示する。
+
+----------------------------------------
+include::usage/nodes.txt[]
+----------------------------------------
+
+`--tsv`:: TSV形式で表示する。
+
+
+==== bmc import-kernel, import-initrd, import-rootfs
+
+イメージをBMCに登録する。
+
+----------------------------------------
+include::usage/import-kernel.txt[]
+include::usage/import-initrd.txt[]
+include::usage/import-rootfs.txt[]
+----------------------------------------
+
+`-s` _file_::
+`--sign=`_file_:: S-RAMFS時に使用するサインファイルを指定する。ファイルはBMC内にコピーされる。
+_file_:: イメージファイルを指定する。ファイルはBMC内にコピーされる。
+_URL_::  イメージファイルのURLを指定すると wget で取得する。
+
+
+==== bmc rm-kernel, rm-initrd, rm-rootfs, rm-image
+
+イメージを削除する。
+
+----------------------------------------
+include::usage/rm-kernel.txt[]
+include::usage/rm-initrd.txt[]
+include::usage/rm-rootfs.txt[]
+include::usage/rm-image.txt[]
+----------------------------------------
+
+_name_:: 削除対象のイメージ名を指定する。
+
+`bmc rm-rootfs` と `bmc rm-image` は同じである。
+
+
+==== bmc set-kernel-param
+
+----------------------------------------
+include::usage/set-kernel-param.txt[]
+----------------------------------------
+
+_name_:: カーネル名を指定する。
+_parameters_:: _keyword_`=`_value_ の形式をカンマでつないだものを指定する。
+
+
+==== bmc pull-bmc
+
+bitbucketのリポジトリからBMCイメージを取り込む。
+
+----------------------------------------
+include::usage/pull-bmc.txt[]
+----------------------------------------
+
+_repo_:: リポジトリのURIを指定する。
+  ** `ssh://hg@bitbucket.org/` _user_name_ `/` _repository_name_
+  ** `https://` _user_name_ `@bitbucket.org/` _user_name_ `/` _repository_name_
+  ** `git@bitbucket.org:` _user_name_ `/` _repository_name_ `.git`
+  ** `https://` _user_name_ `@bitbucket.org/` _user_name_ `/` _repository_name_ `.git`
+_nick_name_:: BMCイメージの名前を指定する。
+
+リポジトリには `BMCfile` が存在していなければならない。
+`BMCfile` の書式は以下のとおり:
+
+----------------------------------------
+kernel ファイル名
+initrd ファイル名
+param  パラメータファイル
+kernelsig カーネルサインファイル
+initrdsig initrdサインファイル
+----------------------------------------
+
+
+==== bmc pull
+
+dockerイメージをBMCイメージとして取り込む。
+
+----------------------------------------
+include::usage/pull.txt[]
+----------------------------------------
+
+`--nopull`:: `docker pull` を実行しない。
+  すでにローカルにdockerイメージが存在する場合に指定することで、dockerhubに問い合わせる時間を節約できる。
+_name_:: dockerイメージ名を指定する。
+
+
+==== bmc images
+
+登録されているカーネル・initrd・BMCイメージの一覧を表示する。
+
+----------------------------------------
+include::usage/images.txt[]
+----------------------------------------
+
+.各カラムの意味
+[horizontal]
+`ID`::     登録順に採番される番号(内部利用のみ)
+`name`::   `bmc import-kernel`, `import-initrd`, `import-rootfs`, `pull` で指定した _NAME_ 
+`file`::   保存しているファイルの `BMC_REPO_ROOT` からの相対パス
+`sig`::    サイン付きで登録した場合の、サインファイルの `BMC_REPO_ROOT` からの相対パス
+`param`::  カーネルパラメータ
+
+
+==== bmc image-info
+
+BMCイメージの情報を表示する。
+
+----------------------------------------
+include::usage/image-info.txt[]
+----------------------------------------
+
+`--kernel`:: カーネルだけマッチする。
+`--initrd`:: initrdだけマッチする。
+`--rootfs`:: BMCイメージにだけマッチする。
+_name_:: 名前を指定する。
+
+現状は登録されているかどうかを表示するだけである。
+
+
+=== BMCのコンテナに関するコマンド
+
+
+==== bmc run
+
+BMCイメージを指定して新しいBMCコンテナを作成する。
+
+----------------------------------------
+include::usage/run.txt[]
+----------------------------------------
+
+`-t`::
+`--tty=`_bool_::
+    端末を割り当てるかどうか指定する。省略時は
+    _command_ 省略時::: `true`
+  _ command_ 指定時::: `false` 
+`--cidfile=`_file_::
+    作成したBMCコンテナのBMCIDをファイルに記録する。
+`--fstype=`_kwd_::
+    rootfsのマウント方法を指定する。
+    `nfs`::: BMCサーバをNFSサーバにしてBMCコンテナがNFSマウントする。
+        BMCイメージ内にアクセスされないファイルが多数存在する場合に有利になる。
+    `ramfs`::: BMCイメージをBMCコンテナにhttpで転送しramfs上に展開する。
+        最初にまとめて転送するため、頻繁にread/writeアクセスするアプリケーションンで有利になる。
+    `s-ramfs`::: `ramfs` に加え、
+        BMCサーバはTPMによりBMCノードが改竄されていないこと確認し、
+        BMCノードはコードサイニングによりkenrelとinitrdが改竄されていないことを確認する。
+    `isofs`:::
+      ISOイメージとしてブートする。
+      FreeBSDで使用する場合にはkernelにsyslinuxのmemdisk、initrdにmfsbsdを指定する。
+      (IPアドレスの指定が効かない=DHCPになるためBMCとしては動作せず)
+`--rank=`_rank_expr_::
+    `bmc addnode` 時に指定したランクが条件 _rank_expr_ を満すものの中からノードを選択する。
+    複数回条件を指定した場合は AND 結合される。
+    `--rank=` を指定しなかった場合は `any` が指定されたものとみなす。
+    `any`:::    すべてのノードを候補にする。
+    `eq` _n_::: _n_ に一致するノードを候補にする。
+    `ge` _n_::: _n_ 以上のランクのノードを候補にする。
+    `le` _n_::: _n_ 以下のランクのノードを候補にする。
+`--kernel-param=`_param_::
+    `bmc addnode` 時に指定したカーネルパラメータに加え _param_ もカーネルに渡す。
+`--early=`_bool_::
+    ノードの電源を入れるタイミングを制御する。デフォルトは `auto` 。
+    `true`:::  ノードの電源を入れてからrootfsの準備をする。
+    `false`::: rootfsの準備ができてからノードの電源を入れる。
+    `auto`:::  `wol` 時は `false` 、 `ipmi` と `amt` 時は `true` 。
+`--pull-bg=`_bool_::
+    BMCイメージが存在しない場合は `bmc pull` を実行するが、ノードの電源投入と並行して実行するかどうかを指定する。
+    デフォルトは `true` 。
+    `true`:::  ノードの電源投入と並行して `bmc pull` を実行する。
+    `false`::: `bmc pull` が完了してから電源投入する。
+`--timeout=`_second_::
+    `bmc run` を実行してノードの起動が完了するまでの待ち時間[s]を指定する。デフォルトは `BMC_RUN_TIMEOUT` で180[s]。
+`--reset-atime=`_bool_::
+    `nfs` 時にatimeをunix epochにリセットするか指定する。デフォルトは `false` 。
+    `true` を指定するとリセット動作に加えて
+    `bmc run` 終了時にatimeが更新されているファイルのリストを _BMCID_`-atime.out` に出力する。
+
+dockerと異なり `bmc run` が終了してもコンテナは実行中のままであり、
+明示的に `bmc kill` で停止するまで動きつづける。
+
+
+.処理概要
+----------------------------------------
+bmc_run() {
+    引数解析;
+    if (rootfsが存在しない) {
+        if (not --pull-bg) {
+            bmc pull --nopull;
+        }
+    }
+    ワーカーノード割り当て;
+    if (--pull-bg) {
+        #DockerHubにイメージがあるかどうかチェック;
+        bmc pull --nopull &;
+    }
+    if (--early) {
+        poweron node;
+    }
+    if (--pull-bg) {
+        wait for bmc pull;
+    }
+    kernel/initrd/rootfsをApacheディレクトリにコピーする;
+        #このとき/etcなど編集
+    
+    if (not --early) {
+        poweron node;
+    }
+    
+    ワーカーノードが立ち上がるのを待つ;
+    sshのポートが開くのを待つ;
+    
+    ssh -o StrictHostKeyChecking=no root@ワーカーノード コマンド
+}
+----------------------------------------
+
+.既知の問題
+* sshでワーカーノードにログインするときにhost keyのチェックを無効化しているので
+  MITMの危険がある。
+
+
+==== bmc ps
+
+BMCコンテナの一覧を表示する。
+
+----------------------------------------
+include::usage/ps.txt[]
+----------------------------------------
+
+`-a`::
+`--all=`_bool_:: 停止したコンテナも表示するかどうか。省略時は `false` 。
+`-q`::
+`--quiet=true`:: BMCIDだけを表示する。
+`--tsv`:: TSV形式で表示する。
+
+
+==== bmc attach
+
+実行中のBMCコンテナに接続する。
+
+----------------------------------------
+include::usage/attach.txt[]
+----------------------------------------
+
+`-t`::
+`--tty=`_bool_:: 端末を割り当てるかどうか指定する。省略時は
+  _command_ 省略時::: `true`
+  _command_ 指定時::: `false` 
+_command_ _arg_...:: 実行するコマンド・引数を指定する。省略するとBMCコンテナにログインする。
+
+
+==== bmc kill
+
+BMCコンテナを停止する。
+
+----------------------------------------
+include::usage/kill.txt[]
+----------------------------------------
+
+_BMCID_:: 実行中のBMCコンテナのIDを指定する。
+
+
+==== bmc rm
+
+BMCコンテナを削除する。
+
+----------------------------------------
+include::usage/rm.txt[]
+----------------------------------------
+
+`-f`::
+`--force=`_bool_:: BMCコンテナが終了していなくてもコンテナを削除する。
+`BMCID`:: 削除対象のコンテナのBMCIDを指定する。
+
+
+== BMC管理者コマンド [[bmc-admin]]
+
+
+=== bmc-init [[bmc-init]]
+
+BMCサーバのDBを初期化する。
+
+----------------------------------------
+Usage: sudo bmc-init
+----------------------------------------
+
+
+=== bmc-load [[bmc-load]]
+
+BMCサーバに初期設定を流し込む。
+
+----------------------------------------
+Usage: bmc-load
+----------------------------------------
+
+`install.sh` 実行前に `src/sbin/bmc-load.sh` を環境に合わせて編集しておかなければならない。
+
+
+=== bmc-dumpdb [[bmc-dumpdb]]
+
+BMCサーバのDBをダンプする。
+
+----------------------------------------
+Usage: bmc-dumpdb [-C|-H|-T] [DBfile]
+----------------------------------------
+
+`-C`:: 表形式で出力する。
+`-H`:: HTMLで出力する。
+`-T`:: Tab区切りで出力する。
+_DBfile_:: 標準とは違う場所にあるDBをダンプするときに指定する。
+
+
+=== bmc-sql [[bmc-sql]]
+
+BMCサーバのDBを直接操作する。
+
+----------------------------------------
+Usage: bmc-sql
+----------------------------------------
+
+
+=== bmc-cleanup [[bmc-cleanup]]
+
+
+BMCの各ディレクトリの下のファイルを対話的に消す。(未完成)
+
+----------------------------------------
+Usage: bmc-cleanup
+----------------------------------------
+
+
+=== tool/bmckillall [[bmckillall]]
+
+BMCコンテナをすべて止め(kill)て削除(rm)する。
+
+----------------------------------------
+Usage: /opt/bmc/tool/bmckillall
+----------------------------------------
+
+
+== BMCツール
+
+
+=== tool/bmc-push [[bmc-push]]
+
+bitbucketリポジトリにBMCイメージ(kernel,initrd,kernel-param)を作成する。
+事前にbitbucketのアカウントを作成しておかなければならない。
+
+----------------------------------------
+Usage: /opt/bmc/tool/bmc-push -k KERNEL_FILE -i INITRD_FILE [-p 'KERNEL_PARAMS'] [-s SIGN_FILE] [-c] USER/REPO
+Options:
+ -k FILE        specify a kernel file
+ -i FILE        specify a initrd file
+ -p STR         specify kernel parameters
+ -s FILE        specify a sign of kernel file
+ -c             don't create the repository
+example: /opt/bmc/tool/bmc-push -k vmlinux -i initrd.img -p 'aaa=bbb xxx=yyy' -s vmlinux.sig alice/test
+how to sign:
+  openssl cms -sign -binary -noattr -in INITRD -signer CERT -inkey PRIVATE_KEY -certfile CA_CERT -outform DER -out INITRD_SIG
+----------------------------------------
+
+
+=== tool/bmc-copy [[bmc-copy]]
+
+ローカル環境とBMCコンテナ間でファイルのコピー。
+
+----------------------------------------
+Usage: /opt/bmc/tool/bmc-copy BMCID:SRC_PATH HOST_DST_PATH
+Usage: /opt/bmc/tool/bmc-copy HOST_SRC_PATH BMCID:DST_PATH
+----------------------------------------
+
+ファイルは1つずつ指定する。パターンはつかえない。
+
+
+=== tool/bmc-get-image [[bmc-get-image]]
+
+実行中のコンテナのファイルをtarballにする。
+
+----------------------------------------
+Usage: /opt/bmc/tool/bmc-get-image BMCID FILE.tar.gz
+----------------------------------------
+
+
+=== tool/mkchart [[mkchart]]
+
+一連のBMCコンテナの実行後に
+/var/tmp/bmc/time.log, wattcheckerの出力, sarnetの出力を参照して、
+コンテナごとにデータを切り出す。
+時刻はbmc runを実行した時刻を0とする相対時刻に変換する。
+
+----------------------------------------
+Usage: /opt/bmc/tool/mkchart [OPTIONS] BMCID...
+----------------------------------------
+
+`-l` _LOGFILE_::
+    time.logの場所を指定する。
+    デフォルトは /var/tmp/bmc/time.log 。
+`-p` _POWERFILE_::
+    wattcheckerの出力ファイルを指定する。
+`-P` _POWER_GUARD_TIME_::
+    wattcheckerの出力ファイル切り出しで、
+    time.logでBMCIDが最後に現われた時刻より _POWER_GURARD_TIME_ [s]だけ余計に切り出す。
+    powerdownコマンドを送ってもすぐに電源が落ちないマシンへの対策。
+    デフォルトは3[s]。
+`-M` _MIN_POWER_THRESHOLD_::
+    wattcheckerの出力ファイル切り出しで、
+    _MIN_POWER_THRESHOLD_ [W]より低い消費電力は0[W]とみなす。
+    デフォルトは0。
+`-D` _POWER_DELAY_::
+    wattcheckerの出力ファイル切り出しで、
+    wattcheckerの出力が _POWER_DELAY_ [s]遅れているとみなして、補正した相対時刻で出力する。
+    デフォルトは0。
+`-n` _TRAFFICFILE_::
+    sarnetの出力ファイルを指定する。
+`-F` _FORMAT_::
+    mkchartが出力するグラフの種類を指定する。
+    `dat`::: データを切り出すだけでグラフは出力しない。(_BMCID_`.dat`, _BMCID_`.pwr.dat`, _BMCID_`.net.dat` が作成される)
+    `x11`::: `dat` に加えて、X11ディスプレイにグラフを表示する。
+    `png`::: `dat` に加えて、グラフをPNGファイルとして出力する。(_BMCID_`.png` が作成される)
+    `svg`::: `dat` に加えて、グラフをSVGファイルとして出力する。(_BMCID_`.svg` が作成される)
+
+
+.ワークフロー
+----------------------------------------
+(bmc run)               (wattchecker)   (sarnet)
+   |                       |               |
+   |                       |               |
+   V                       V               V
+/var/tmp/bmc/time.log    ./watt.out     ./sarnet.out
+   |                       |               |
+   |_______________________|_______________|
+   |
+   V
+(mkchart)
+   |_______________________________
+   |               |               |
+   V               V               V
+BMCID.dat       BMCID.pwr.dat   BMCID.net.dat
+BMCID.gpl       BMCID.pwr.gpl   BMCID.net.gpl
+BMCID.png       BMCID.pwr.png   BMCID.net.png
+   |               |               |
+   |_______________|_______________|
+   |
+   V
+(joule)
+   |
+   V
+----------------------------------------
+
+._BMCID_`.dat` のフォーマット
+----------------------------------------
+#Tmin UNIX時刻 ISO時刻
+#Tmax UNIX時刻 ISO時刻
+#Tdif Tmax-Tmin(秒)
+処理 開始相対時刻(秒) 終了相対時刻(秒) 経過時間(秒)
+...
+----------------------------------------
+
+._BMCID_`.pwr.dat` のフォーマット
+----------------------------------------
+#T W
+相対時刻(秒) 消費電力(W)
+...
+----------------------------------------
+
+._BMCID_`.net.dat` のフォーマット
+----------------------------------------
+#T TxKiB/s RxKiB/s
+相対時刻(秒) BMCサーバ送信レート(KiB/s) BMCサーバ受信レート(KiB/s)
+...
+----------------------------------------
+
+
+=== tool/joule [[joule]]
+
+mkchartが出力した BMCID.dat と BMCID.pwr.dat/BMCID.net.dat を参照して、
+区間なんで消費した電力量[J](=[Ws])/通信量[KiB]を算出する。
+
+----------------------------------------
+Usage: /opt/bmc/tool/joule BMCID.dat BMCID.pwr.dat 区間始点 区間終点
+----------------------------------------
+
+.区間始点の表記
+[horizontal]
+`[`_sss_:: 処理 _sss_ の開始時刻 
+_sss_`[`:: 処理 _sss_ の終了時刻
+
+.区間終点の表記
+[horizontal]
+`]`_eee_:: 処理 _eee_ の開始時刻 
+_eee_`]`:: 処理 _eee_ の終了時刻
+
+
+=== tool/sarnet [[sarnet]]
+
+sarコマンドを実行して eth0 のネットワークトラフィックを1秒間隔で表示する。
+
+----------------------------------------
+Usage: /opt/bmc/tool/sarnet
+----------------------------------------
+
+実行しつづけるのでシグナルを送って止める。
+
+
+=== tool/wattchecker [[wattchecker]]
+
+大崎電気工業のワットチェッカーMWA-01/MWI-01を使用して消費電力を測定する。
+
+----------------------------------------
+Usage: /opt/bmc/tool/wattchecker [OPTIONS]
+----------------------------------------
+
+`-v`:: 電圧も測定する。 `-v`,`-a`,`-w` のいずれも指定しなかった場合には `-vaw` が指定されたものとみなす。
+`-a`:: 電流も測定する。
+`-w`:: 電力も測定する。
+`-d` _DEV_:: 入力デバイス(tty)を指定する。省略時は `/dev/ttyUSB0` 。
+`-h`:: ヘッダ行を表示する。
+`-l` _DIR_:: 出力ディレクトリを指定する。省略時は標準出力に表示される。
+`-s` _SEC_:: 測定間隔[s]を指定する。 
+
+.ttyの設定
+* 1200ボー
+* パリティビットなし
+* 8ビット
+* 1ストップビット
+* モデム制御なし
+* RTS/CTSフロー制御なし
+
+実行しつづけるのでシグナルを送って止める。
+
+
+=== tool/plotdmesg [[plotdmesg]]
+
+BMCコンテナのdmesgを散布図にする。
+起動のどこで時間をつかっているのか調べるのに用いた。
+
+----------------------------------------
+Usage: /opt/bmc/tool/plotdmesg BMCID
+----------------------------------------
+
+.使用例
+----------------------------------------
+% bmc attach BMCID dmesg >dmesg.BMCID
+% /opt/bmc/tool/plotdmesg BMCID
+----------------------------------------
+
+
+=== tool/mkman [[mkman]]
+
+bmc 各コマンドのusageを表示する。
+
+----------------------------------------
+Usage: /opt/bmc/tool/mkman
+----------------------------------------
+
+
+=== tool/setpgid [[setpgid]]
+
+プロセスグループを作成してコマンドを実行する。
+
+----------------------------------------
+Usage: /opt/bmc/tool/setpgid command args...
+----------------------------------------
+
+
+== iPXE-Auth [[iPXE-Auth]]
+
+CAUTION: 公開禁止
+
+
+=== インストール手順
+
+bmc/src/etc/bmc.confを(必要なら編集も)インストール後、ipxe_authをインストールする。
+iPXEには証明書をコードサイニングの証明書とBMCサーバのサーバ証明書を埋め込んでおく。
+iPXEブートスクリプトはtrusted boot用のものを用意する。
+
+----------------------------------------
+% cd /.../bmc-xxx/src
+% vi etc/bmc.conf
+... TPM_XXX の設定をいじる(通常は変更の必要はない) ...
+% sudo ./install.sh
+% cd /...
+% tar xvf ipxe_auth-xxx.tar.gz
+% cd ipxe_auth-xxx
+% sudo ./install.sh
+... /opt/bmc/etc/bmc.confの内容に従ってインストールされる ...
+----------------------------------------
+
+.iPXEスクリプトの例
+----------------------------------------
+#!ipxe
+ifconf net0
+set net0/ip 192.168.1.10       #ノード毎に変える
+set net0/netmask 255.255.255.0
+set net0/gateway 192.168.1.254
+set dns 192.168.1.1
+show net0/ip
+imgtrust --permanent
+imgfetch --name script https://192.168.1.2/cgi-bin/baremetal.ipxe?sign=req
+imgverify script https://192.168.1.2/cgi-bin/bmc-sig
+imgstat
+imgexec script
+shell
+exit
+----------------------------------------
+
+
+=== AIK公開鍵の登録
+
+----------------------------------------
+% /opt/bmc/sbin/register_machine.sh MACADDR AIK_PUB_FILE
+...
+----------------------------------------
+
+
+=== `bmc run --fstype=s-ramfs` のシーケンス
+
+----------------------------------------
+User            BMCserver       WorkerNode
+|               |               |
+|               |  powerup      |
+|               |-------------->|
+|   builtin   { |               * iPXE起動
+|   script    { |               * chain http://BMC_SERVER/cgi-bin/baremetal.ipxe
+|             { | GET /cgi-bin/baremetal.ipxe
+|             { |<--------------|
+|             { |     o->       |
+|               |               |
+|  script     { |               * imgload https://BMC_SERVER/cgi-bin/auth2.cgi?bmcid=XXX&sign=req
+|  returned   { | GET /cgi-bin/auth2.cgi
+|  by         { |<--------------|
+|baremetal.ipxe |     o->       |
+|             { |               * imgverify auth2.cgi https://BMC_SERVER/cgi-bin/bmc-sig
+|             { | GET /cgi-bin/bmc-sig
+|             { |<--------------|
+|             { |     o->       |
+|             { |               * imgexec auth2.cgi
+|               |               |
+|  script     { |               * imgload https://BMC_SERVER/cgi-bin/new_session.cgi?macaddr=XX:XX:XX:XX:XX:XX&bmcid=XXX&sign=req
+|  returned   { | GET /cgi-bin/new_session.cgi?macaddr=XX:XX:XX:XX:XX:XX&bmcid=XXX&sign=req
+|  by         { |<--------------|
+|  auth2.cgi  { |     o->       |
+|             { |               * imgverify new_session.cgi https://BMC_SERVER/cgi-bin/bmc-sig
+|             { | GET /cgi-bin/bmc-sig
+|             { |<--------------|
+|             { |     o->       |
+|             { |               * imgexec new_session.cgi
+|               |               |
+|               |               |
+|  script     { |               * param --params tpm_quote bmcid BMCID
+|  returned   { |               * imgload https://BMC_SERVER/cgi-bin/tryauth.cgi?bmcid==XXX&sign=req##params=tpm_quote
+|  by         { | POST /cgi-bin/tryauth.cgi?bmcid=XXX&sign=req tpm_quote
+|new_session.cgi|<--------------|
+|             { |     <-o       |
+|             { |     o->       |
+|             { |               * imgverify tryauth.cgi https://BMC_SERVER/cgi-bin/bmc-sig
+|             { |               * imgexec tryauth.cgi
+|               |               |
+|               |               |
+|  script     { |               * imgload https://BMC_SERVER/cgi-bin/baremetal.ipxe?session_id=XXX&bmc_nonce=XXX&sign=req
+|  returned   { | GET /cgi-bin/baremetal.ipxe?session_id=XXX&bmc_nonce=XXX&sign=req
+|  by         { |<--------------|
+|  auth2.cgi  { |     o->       |
+|             { |               * imgverify baremetal.ipxe https://BMC_SERVER/cgi-bin/bmc-sig
+|             { | GET /cgi-bin/bmc-sig
+|             { |<--------------|
+|             { |     o->       |
+|               |               * imgexec baremetal.ipxe
+|               |               |
+|               |               |
+|  script     { |               * kernel https://BMC_SERVER/bmc/kernel/Kxxx
+|  returned   { | GET /bmc/kernel/Kxxx
+|  by         { |<--------------|
+|baremetal.ipxe |     o->       |
+|             { |               * initrd https://BMC_SERVER/bmc/initrd/Ixxx
+|             { | GET /bmc/initrd/Ixxx
+|             { |<--------------|
+|             { |     o->       |
+|             { |               * imgargs Kxxx bmcid=XXX bmcroot=https://BMC_SERVER/bmc/rootfs/... ...
+|             { |               * imgverify Kxxx https://BMC_SERVER/bmc/kernel/Kxxx.sig
+|             { | GET /bmc/kernel/Kxxx.sig
+|             { |<--------------|
+|             { |     o->       |
+|             { |               * imgverify Ixxx https://BMC_SERVER/bmc/initrd/Ixxx.sig
+|             { | GET /bmc/initrd/Ixxx.sig
+|             { |<--------------|
+|             { |     o->       |
+|             { |               * imgexec Kxxx
+|               |               |
+----------------------------------------
+
+.既知の問題
+* iPXEのSSL実装は処理速度が遅い。(initrd内のwgetと比較して)
+* iPXEのimgtrustでsignerを指定できないためサーバを信じるしかない。
+
+
+== FAQ
+
+[qanda]
+Ubuntu上で、apacheがインスールされているDockerイメージをつくるには?::
+    aufsだと失敗するらしい。消極的回避方法として、CentOS上でDockerイメージをつくる。
++
+----------------------------------------
+Running transaction
+  Installing : httpd-2.4.6-40.el7.centos.x86_64                                      1/1
+Error unpacking rpm package httpd-2.4.6-40.el7.centos.x86_64
+error: unpacking of archive failed on file /usr/sbin/suexec: cpio: cap_set_file
+  Verifying  : httpd-2.4.6-40.el7.centos.x86_64                                      1/1
+
+Failed:
+  httpd.x86_64 0:2.4.6-40.el7.centos
+
+Complete!
+----------------------------------------
+
+カーネル名・initrd名・BMCイメージ名のなかにハイフン("-")がつかえない?::
+    調査中 (Ubuntu14.04では使えた)
+
+`src/etc/bmc-sqliterc` の `.timeout` 指定でエラーになる::
+    一部の環境で発生するが原因不明である。
+
+[appendix]
+== License
+
+....
+Copyright(C): National Institute of Advanced Industrial Science and Technology 2016
+Authors:     
+              Hidetaka Koie <koie-hidetaka@aist.go.jp>
+              Kuniyasu Suzaki <k.suzaki@aist.go.jp>
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+....

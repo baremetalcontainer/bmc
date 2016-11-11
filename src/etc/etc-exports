@@ -1,0 +1,2 @@
+# don't forget service nfs restart
+/var/docker-nfs *(rw,no_root_squash)

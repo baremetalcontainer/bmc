@@ -1,0 +1,1 @@
+/var/docker-nfs *(rw,no_root_squash)

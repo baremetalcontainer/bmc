@@ -1,0 +1,47 @@
+= BMC in Docker
+
+== Prepare two PCs
+
+1. PC which is Docker installed.
+2. PC which is ready to WoL or IPMI or AMT.
+
+== Build and Run
+
+.Build BMC Container
+----
+host> cd bmc/docker
+host> make
+----
+
+.Build site-specific BMC Container
+----
+host> cd manager
+host> vi build.sh
+	Set and AMT_PASSWORD=, and
+	Set parameters of bmc addnode:
+	  --name='name of worker-PC'
+	  --method_mgmt='wol', 'ipmi' or 'amt'
+	  --descr='description of worker-PC'
+	  --have_tpm=false
+	  --ip4_addr_mgmt='address of IPMI or AMT'
+	  --password_mgmt='password of IPMI or AMT'
+	  --ip4_addr_boot='address of iPXE boot'
+	  --interface_os='eth0'
+	  --ip4_addr_os='address of an OS'
+	  --netmask_os='netmask(IPv4)'
+	  --gateway_os='address of a default router(IPv4)'
+	  --dns_os='address of a name server'
+host> make
+----
+
+.Run BMC Container
+----
+host> make run
+container> bmc run centos7.bmc default default /bin/sh
+----
+
+=== How to run without apache
+
+----
+host> docker run --privileged --net=host --interactive --tty --entrypoint=/bin/bash --rm bmc
+----

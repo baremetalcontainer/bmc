@@ -1,0 +1,143 @@
+[BMC (Bare-Metal Container)](http://www.itri.aist.go.jp/cpc/research/bmc/) offers an environment to run a container (Docker) image with a suitable Linux kernel on a remote physical machine.  BMC allows to change the kernel and its settings for the container (Docker) image. As a result, the application extracts the full performance of the physical machine.
+
+The following shows the difference in application invocation between traditional style and BMC. The traditional style is a system-centric architecture as it assumes the system software is fixed, running all the time, and unalterable by users. In contrast, BMC allows users to change the kernel and the machine for each application, which we describe as an application-centric architecture.
+![alt tag](http://www.itri.aist.go.jp/cpc/research/bmc/img/bmc.png)
+
+A pre-built BMC image using DIND (Docker in Docker) technique is offered. Users can avid burdensome setting up (ex. Apache CGI, etc). We recommend new users to try this pre-built version.
+
+# SETUP INSTRUCTION
+
+# 0) Requisites
+
+* A Linux PC which runs Docker. It works as BMC Manager.
+Stop HTTP/HTTPS daemon (Apache) on the machine. The ports are must be opened for BMC Manager.
+* A node PC which is booted by BMC. The hard-disk is not used. Set up it as USB boot first.
+* USB Memory. **CAUTION All data will be erased.**
+* 2-3 static IP addresses for each node PC. The addresses are used for Remote Machine Management (IP-A), iPXE (IP-B) and Linux (IP-C).
+
+BMC requires setting up for 1) Remote Machine Management, 2) iPXE and 3) BMC manager.
+
+# 1) Remote Machine Management
+
+BMC deals with the 3 remote machine management technologies; Intel AMT, IMPI and WOL. Setup one of them.
+
+#### 1-A) Intel AMT (Active Management Technology)
+
+If your machine has Intel vPro technology, you can use Intel AMT.
+The setting-up of Intel AMT requires special procedure to enter.
+* Power up pressing ?Control? and ?P? (on ThinkPad T430s or Let?sNote CF-NX2.)
+* Power up pressing ?Enter? (on Think Pad P70 or T460s.)
+The following video is useful.
+[Provision your Intel AMT system in 10 minutes!](https://www.youtube.com/watch?v=5KS-k9uM_Gk)
+Setup IP-A for Intel AMT.
+Remember the password for Intel AMT. It is used for BMC manager.
+
+#### 1-B) IPMI (Intelligent Platform Management Interface)
+
+Set up IPMI using BIOS setting. You have to register 1 static IP address.
+Setup IP-A for Intel IPMI.
+Remember the password for IPMI. It is used for BMC manager.
+
+#### 1-C) WOL(Wakeup On Lan)
+
+Enable WOL using BIOS setting. WOL does not require IP address but it uses MAC address.
+Remember the MAC address. It is used for BMC manager.
+
+# 2)  iPXE http://ipxe.org
+
+The remote machine has to boot with iPXE. We recommend to use USB iPXE.
+Please make an USB-iPXE image for your environment using AutoMake service.
+https://rom-o-matic.eu/
+* 2-A) Choose ?USB Keychain disk image (.usb)?
+* 2-B) Paste a iPXE script for a BMC node.
+    The following sample assume the node has 192.168.0.101 and BMC manage has 192.168.0.200 which is the IP address of host OS of Docker.
+    Change the IP addresses for your environment.
+````
+#!ipxe
+ifopen net0
+set net0/ip 192.168.0.101
+set net0/netmask 255.255.255.0
+set net0/gateway 192.168.0.1
+set dns 192.168.0.1
+:loop
+chain http://192.168.0.200/cgi-bin/baremetal.ipxe || goto waiting
+# chain http://192.168.0.200/cgi-bin/baremetal.ipxe || goto waiting
+exit
+:waiting
+sleep 1
+goto loop
+````
+* 2-C) Press the ?Proceed>>? button. A *.usb file is downloaded.
+* 2-D) Copy the ?*.usb? file to a USB memory by ?dd? command.  **CAUTION All data on the SUB memory is erased.**
+* 2-E) Set up your remote machine as USB memory boot first.
+
+# 3) BMC Manager
+
+Run the Docker image which includes BMC manager.
+````
+# docker run --privileged --net=host --interactive --tty baremetalcontainer/bmc
+````
+**CAUTIONThe Docker image reuse the IP address of host OS. Please stop HTTP/HTTPS server on the host OS.** 
+
+You will enter the Linux (BMC instance) which includes BMC manger.
+
+Set up your remote machine by ?addnode? on a BMC instance.
+The following is the sample of ?addnode?.
+The sample assumes IP-A=192.168.0.101, IP-B=192.168.0.102, IP-C=192.168.103.
+?mac_addr_mgmt? is used for WOL only.
+Change the arguments which fit your environment and run the command.
+````
+# bmc addnode \
+        --name="Machine name" \
+        --descr="Descriptions" \
+        --rank="1" \
+        --method_mgmt="amt" \
+        --mac_addr_mgmt="XX:XX:XX:XX:XX:XX" \
+        --ip4_addr_mgmt="192.168.0.101" \
+        --password_mgmt="PASSWORD" \
+        --interface_os='eth0' \
+        --ip4_addr_boot="192.168.0.102" \
+        --ip4_addr_os="192.168.0.103" \
+        --netmask_os="255.255.255.0" \
+        --gateway_os="192.168.0.1" \
+        --dns_os="192.168.0.1"
+````
+
+Pull a kernel image and an initrd image.
+````
+# bmc pull-bmc https://github.com/baremetalcontainer/bmc-ubuntu-3.13.11.git default
+````
+
+Pull a Docker image.
+````
+# bmc pull baremetalcontainer/centos7.bmc
+````
+
+Run a BMC instance on the remote machine.
+````
+# bmc run -t --rank='eq 1' centos7.bmc default default bash
+````
+
+You will find the remote machine boots up . You will login the remote machine with ?bash?.
+
+Other useful commands.
+You can check the running BMC images. It shows each BMC-ID.
+````
+# bmc ps
+````
+
+You can kill the BMC instance.
+````
+# bmc kill BMC-ID
+````
+
+You can remove the BMC image.
+````
+# bmc rm BMC-ID
+````
+
+# Paper
+* [1] K.Suzaki, H.Koie, and R.Takano, "Bare-Metal Container", IEEE High Performance Computing and Communications (HPCC) Dec.2016. http://www.swinflow.org/confs/2016/hpcc/
+
+# Exhibition
+* [1] SuperComuting16 (SC16) [AIST booth 1709](http://iebms.heiexpo.com/iebms/oep/oep_p2_details.aspx?sessionid=fbkfe0fe8ff6ej4ff8ein&like=A&OrderNbr=8255) Nov.2016 http://sc16.supercomputing.org/

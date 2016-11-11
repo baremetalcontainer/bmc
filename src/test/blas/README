@@ -1,0 +1,24 @@
+OpenBLASをつかってCPUごとの最適化
+
+1. パッケージ版OpenBLAS入りのCentOS7のイメージをつくってBMCに登録する。
+   pushd ../centos7; make; popd
+   make
+2. パラメータを環境にあわせて変更する。
+   vi test.sh
+3. Octaveベンチマークスクリプトを調整する。
+   vi bench.m
+4. ベンチマーク実行
+   script -a -c "sh test.sh"
+   各BMCノードでノードに特化したOpenBLASを作成してBMCイメージ作成して
+   ノードとイメージの総当たりベンチマークを実施する。
+   HTTon/offも。
+5. 結果ファイル
+    time.out ... 生ログ(bmc)
+    watt.out ... 生ログ(wattchecker)
+    sarnet.out ... 生ログ(sar)
+    BMCID.log ... 生ログからの切り出し
+    BMCID.dat ... 区間タイム
+    BMCID.pwr.dat ... watt.outからの切り出し(相対時刻に変換+時間補正済み)
+    BMCID.net.dat ... sarnet.outからの切り出し(相対時刻に変換)
+    report.out ... 区間タイム・区間電力量・区間消費電力 (区間指定はmeter_request_reportにて)
+    res-{on,off}.out ... HTT {on,off}で実行したときのログ

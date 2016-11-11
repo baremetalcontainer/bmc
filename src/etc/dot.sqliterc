@@ -1,0 +1,3 @@
+# ~/.sqliterc
+.header on
+.mode column

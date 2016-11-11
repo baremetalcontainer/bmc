@@ -1,0 +1,60 @@
+# for CentOS 7
+# http://www.cms-initiative.jp/ja/events/0530nakata.pdf
+
+OPT=$(PWD)/opt
+#SUDO=sudo
+
+all::
+	$(MAKE) preinst
+	$(MAKE) build
+preinst::
+	$(MAKE) pkg
+	$(MAKE) download-atlas
+build::
+	$(MAKE) myatlas
+	$(MAKE) check
+
+REFERENCE_LIB=/usr/lib64/libblas.so:/usr/lib64/liblapack.so.3
+ATLAS_LIB=/usr/lib64/atlas/libtatlas.so.3
+MYATLAS_LIB=$(OPT)/lib/libtatlas.so
+OCTAVE=octave -q
+
+check::
+	$(OCTAVE) $@.m
+	LD_PRELOAD=$(REFERENCE_LIB) $(OCTAVE) $@.m
+	LD_PRELOAD=$(ATLAS_LIB) $(OCTAVE) $@.m
+	LD_PRELOAD=$(MYATLAS_LIB) $(OCTAVE) $@.m
+
+bench::
+	LD_PRELOAD=$(MYATLAS_LIB) $(OCTAVE) $@.m
+
+
+myatlas:: $(MYATLAS_LIB)
+$(OPT)/lib/libtatlas.so: build/lib/libtatlas.so
+	cd build && $(MAKE) install
+build/lib/libtatlas.so: build/Makefile
+	cd build && $(MAKE)
+build/Makefile: ATLAS/configure
+	mkdir -p opt
+	mkdir -p build
+	cd build && ../ATLAS/configure --prefix=$(OPT) --dylibs
+ATLAS/configure: atlas3.10.2.tar.bz2
+	tar xvf atlas3.10.2.tar.bz2
+	touch $@
+atlas3.10.2.tar.bz2 download-atlas:
+	wget http://downloads.sourceforge.net/project/math-atlas/Stable/3.10.2/atlas3.10.2.tar.bz2
+clean::
+	-rm -rf $(OPT)
+	-rm -rf build
+	-rm -rf ATLAS
+distclean:: clean
+	-rm atlas3.10.2.tar.bz2
+
+pkg::
+	$(SUDO) yum install -y epel-release
+	$(SUDO) yum install -y wget bzip2 patch gcc-gfortran gcc-c++ blas-devel octave
+	$(SUDO) touch /usr/share/octave/3.8.2/etc/built-in-docstrings
+		#octave says:
+		#warning: docstring file '/usr/share/octave/3.8.2/etc/built-in-docstrings' not found
+
+#NOTE: ATLAS/cofigure erases Makefile on the current directory.
