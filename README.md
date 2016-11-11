@@ -2,7 +2,7 @@
 BMC allows to change the kernel and its settings for the container (Docker) image.
 As a result, the application extracts the full performance of the physical machine.
 
-The following shows the difference in application invocation between traditional style and BMC.
+The following figure shows the difference in application invocation between traditional style and BMC.
 The traditional style is a system-centric architecture as it assumes the system software is fixed, running all the time, and unalterable by users.
 In contrast, BMC allows users to change the kernel and the machine for each application, which we describe as an application-centric architecture.
 
