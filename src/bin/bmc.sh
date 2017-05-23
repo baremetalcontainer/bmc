@@ -1319,7 +1319,7 @@ customize_rootfs_ssh()
 	local src_addr; src_addr="$(get_src_addr "$dst_addr")"
 	echo "PermitUserEnvironment yes" | SUDOappend "$dist_rootfs/etc/ssh/sshd_config"
 	{
-		cat "$dist_rootfs/etc/ssh/environment"
+		SUDO cat "$dist_rootfs/etc/ssh/environment"
 		echo "BMCID=$bmc_id"
 		echo "BMC_SERVER=$src_addr"
 		echo "BMC_CLIENT=$dst_addr"
@@ -1339,7 +1339,9 @@ customize_rootfs_rc_local()
 	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
 
 	## hack: activate /etc/rc.local
-	SUDO chmod +x "$(readlink -f "$dist_rootfs/etc/rc.local")"
+	local rc_local
+	rc_local="$(SUDO readlink -f "$dist_rootfs/etc/rc.local")"
+	SUDO chmod +x "$rc_local"
 
 	## kicker
 	## XXX FIXME: curl or wget?
@@ -1563,7 +1565,7 @@ prepare_files()
 homeof()
 {
 	local name="$1"; shift
-	local dist_rootfs="$dist_rootfs"; shift
+	local dist_rootfs="$1"; shift
 	[ $# -eq 0 ] || { ERROR "BUG: REST: $*"; exit 1; }
 
 	local passwd_file="$dist_rootfs/etc/passwd"
@@ -1572,8 +1574,8 @@ homeof()
 	else
 		# XXX hack for ramfs
 		case "$name" in
-		root)	echo "/root";;
-		*)	echo "/home/$name";;
+		root)	echo "$dist_rootfs/root";;
+		*)	echo "$dist_rootfs/home/$name";;
 		esac
 	fi
 }
