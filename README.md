@@ -6,7 +6,7 @@ The following figure shows the difference in application invocation between trad
 The traditional style is a system-centric architecture as it assumes the system software is fixed, running all the time, and unalterable by users.
 In contrast, BMC allows users to change the kernel and the machine for each application, which we describe as an application-centric architecture.
 
-![BMC arch](http://www.itri.aist.go.jp/cpc/research/bmc/img/bmc.png)
+![BMC arch](http://www.itri.aist.go.jp/cpc/research/img/research-4-001.png)
 
 A pre-built BMC image using DIND (Docker in Docker) technique is offered.
 Users can avid burdensome setting up (ex. Apache CGI, etc).
