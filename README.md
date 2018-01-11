@@ -9,7 +9,7 @@ In contrast, BMC allows users to change the kernel and the machine for each appl
 ![BMC arch](http://www.itri.aist.go.jp/cpc/research/img/research-4-001.png)
 
 A pre-built BMC image using DIND (Docker in Docker) technique is offered.
-Users can avid burdensome setting up (ex. Apache CGI, etc).
+Users can avoid burdensome setting up (ex. Apache CGI, etc).
 We recommend new users to try this pre-built version.
 
 https://hub.docker.com/r/baremetalcontainer/bmc/
